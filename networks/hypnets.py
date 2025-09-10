@@ -1,7 +1,8 @@
 import torch.nn as nn
 import hypll.nn as hnn
 from hypll.tensors import TangentTensor
-
+import torch
+import torch.nn as nn
 from networks.nets import DeepSet, CategoricalMLP
 
 
@@ -118,3 +119,49 @@ class HyperbolicDeepSet(nn.Module):
         x = self.hyp_layer2(x)
 
         return x
+    
+
+
+
+
+class PairEncoder(nn.Module):
+    """
+    Wraps either a Euclidean MLP or HyperbolicMLP to encode (s,g) pairs.
+    Uses features [s, g, g-s] for relative geometry.
+    """
+    def __init__(self, state_dim, out_dim, hyperbolic, manifold=None,
+                 euc_width=64, hyp_width=64):
+        super().__init__()
+        self.state_dim = state_dim
+        self.hyperbolic = hyperbolic
+        self.manifold = manifold
+
+        in_features = 2 * state_dim  # [s, g, g-s]
+
+        if hyperbolic:
+            # reuse your HyperbolicMLP backbone
+            self.net = HyperbolicMLP(
+                in_features=in_features,
+                out_features=out_dim,
+                manifold=manifold,
+                euc_width=euc_width,
+                hyp_width=hyp_width,
+            )
+        else:
+            self.net = nn.Sequential(
+                nn.Linear(in_features, euc_width),
+                nn.ReLU(),
+                nn.Linear(euc_width, euc_width),
+                nn.ReLU(),
+                nn.Linear(euc_width, out_dim),
+            )
+
+    def forward(self, pair):
+        """
+        pair: [..., 2*state_dim]
+        returns: [..., out_dim]
+        """
+        s, g = torch.split(pair, self.state_dim, dim=-1)
+        feats = torch.cat([s, g], dim=-1)
+        return self.net(feats)
+

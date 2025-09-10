@@ -5,13 +5,12 @@ import wandb
 import torch
 import torch.optim as optim
 from hypll.optim import RiemannianAdam
-
+from hypll.tensors.manifold_tensor import ManifoldTensor
 import numpy as np
 from torch.utils.data import DataLoader
-
 from environments.maze.data import TrajectoryDataset
 from networks.losses import explicit_InfoNCE
-from utils import save_models, evaluate, get_maze, get_order_function, load_model
+from utils import save_models, evaluate, get_maze, get_order_function, load_model, evaluate_pairs
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -57,82 +56,142 @@ def main():
 
     model_dict = load_model(config, device, pretrained_path='')
 
-    encoder1 = model_dict['encoder1']
-    encoder2 = model_dict['encoder2']
-    manifold = model_dict['manifold']
+
+    
+
+    # encoder1 = model_dict['encoder1']
+    # encoder2 = model_dict['encoder2']
+    # manifold = model_dict['manifold']
+
+    # pair_encoder = model_dict['pair_encoder']
+    # manifold     = model_dict['manifold']
+
+
+    # if config.hyperbolic:
+    #     optimizer = RiemannianAdam(
+    #             list(encoder1.parameters()) + list(encoder2.parameters()),
+    #             lr=config['learning_rate'],
+    #         )
+    # else:
+    #     optimizer = torch.optim.Adam(
+    #             list(encoder1.parameters()) + list(encoder2.parameters()),
+    #             lr=config.learning_rate,
+    #         )
+    # # Training loop
+    # total_batches = 0
+    # start_time = time.time()
+
+    # for epoch in range(config.num_epochs):
+    #     total_loss = 0
+
+    #     acc = 0
+    #     fail = 0
+
+    #     for anchor, positive, negatives in dataloader:
+    #         # Compute InfoNCE with hard negative future states
+    #         anchor = torch.as_tensor(anchor, dtype=torch.float32, device=device)
+    #         positive = torch.as_tensor(positive, dtype=torch.float32, device=device)
+    #         negatives = torch.as_tensor(negatives, dtype=torch.float32, device=device)
+
+    #         anchor_enc = encoder1(anchor)  # takes state, action tuple
+    #         positive_enc = encoder2(positive)  # takes state
+    #         negatives_enc = encoder2(negatives)
+
+    #         future_loss = explicit_InfoNCE(
+    #             anchor_enc,
+    #             positive_enc,
+    #             negatives_enc,
+    #             config.temperature,
+    #             hyperbolic=config.hyperbolic,
+    #             manifold=manifold,
+    #             dot=False,
+    #         )
+    #         # future_loss = infoNCE_loss(anchor_enc, positive_enc, negatives_enc, config.temperature)
+
+    #         # Compute InfoNCE with hard negative actions
+    #         cur_state = anchor[:, [0, 1]]
+    #         angle = torch.arctan2(anchor[:, 2], anchor[:, 3])
+    #         negative_actions = (angle + torch.pi)[:, None] + (
+    #             torch.rand(config.num_negatives)[None, :].to(device) - 0.5
+    #         ) * (3 * torch.pi / 2)
+    #         negative_dirs = torch.stack(
+    #             [torch.sin(negative_actions), torch.cos(negative_actions)]
+    #         ).moveaxis(0, -1)
+    #         negative_full = torch.cat(
+    #             (
+    #                 cur_state.unsqueeze(1).expand(-1, config.num_negatives, -1),
+    #                 negative_dirs,
+    #             ),
+    #             dim=-1,
+    #         ).to(device)
+
+    #         neg_action_enc = encoder1(negative_full)
+
+    #         action_loss = explicit_InfoNCE(
+    #             positive_enc,
+    #             anchor_enc,
+    #             neg_action_enc,
+    #             config.temperature,
+    #             hyperbolic=config.hyperbolic,
+    #             manifold=manifold,
+    #             dot=False,
+    #         )
+    #         # action_loss = infoNCE_loss(positive_enc, anchor_enc, neg_action_enc, config.temperature)
+    #         # backprop
+    #         loss = future_loss + action_loss
+
+    #         optimizer.zero_grad()
+    #         loss.backward()
+    #         optimizer.step()
+    #         total_loss += loss.item()
+
+
+
+    pair_encoder = model_dict['pair_encoder']
+    manifold     = model_dict['manifold']
 
     if config.hyperbolic:
-        optimizer = RiemannianAdam(
-                list(encoder1.parameters()) + list(encoder2.parameters()),
-                lr=config['learning_rate'],
-            )
+        optimizer = RiemannianAdam(pair_encoder.parameters(), lr=config['learning_rate'])
     else:
-        optimizer = torch.optim.Adam(
-                list(encoder1.parameters()) + list(encoder2.parameters()),
-                lr=config.learning_rate,
-            )
-    # Training loop
+        optimizer = optim.Adam(pair_encoder.parameters(), lr=config.learning_rate)
+
+    # # Training loop
     total_batches = 0
     start_time = time.time()
-
+    
     for epoch in range(config.num_epochs):
         total_loss = 0
 
         acc = 0
         fail = 0
 
-        for anchor, positive, negatives in dataloader:
-            # Compute InfoNCE with hard negative future states
-            anchor = torch.as_tensor(anchor, dtype=torch.float32, device=device)
-            positive = torch.as_tensor(positive, dtype=torch.float32, device=device)
-            negatives = torch.as_tensor(negatives, dtype=torch.float32, device=device)
+        # --- CHANGE training loop inner body ---
+        for anchor_pair, positive_pair, negatives_pairs in dataloader:
+            anchor_pair    = torch.as_tensor(anchor_pair,    dtype=torch.float32, device=device)   # [B, 2*state_dim]
+            positive_pair  = torch.as_tensor(positive_pair,  dtype=torch.float32, device=device)   # [B, 2*state_dim]
+            negatives_pair = torch.as_tensor(negatives_pairs,dtype=torch.float32, device=device)   # [B, K, 2*state_dim]
 
-            anchor_enc = encoder1(anchor)  # takes state, action tuple
-            positive_enc = encoder2(positive)  # takes state
-            negatives_enc = encoder2(negatives)
+            # encode
+            anchor_enc   = pair_encoder(anchor_pair)                    # [B, D]
+            positive_enc = pair_encoder(positive_pair)                  # [B, D]
 
-            future_loss = explicit_InfoNCE(
+            B, K, F = negatives_pair.shape
+            neg_flat = torch.reshape(negatives_pair, (B * K, F))       # NOT .view
+            neg_enc = pair_encoder(neg_flat)          # ManifoldTensor [B*K, D]
+            if config.hyperbolic:
+                neg_enc = ManifoldTensor(neg_enc.tensor.view(B, K, -1),
+                            manifold=neg_enc.manifold)           # NOT .view
+
+            # InfoNCE over pairs
+            loss = explicit_InfoNCE(
                 anchor_enc,
                 positive_enc,
-                negatives_enc,
+                neg_enc,
                 config.temperature,
                 hyperbolic=config.hyperbolic,
                 manifold=manifold,
                 dot=False,
             )
-            # future_loss = infoNCE_loss(anchor_enc, positive_enc, negatives_enc, config.temperature)
-
-            # Compute InfoNCE with hard negative actions
-            cur_state = anchor[:, [0, 1]]
-            angle = torch.arctan2(anchor[:, 2], anchor[:, 3])
-            negative_actions = (angle + torch.pi)[:, None] + (
-                torch.rand(config.num_negatives)[None, :].to(device) - 0.5
-            ) * (3 * torch.pi / 2)
-            negative_dirs = torch.stack(
-                [torch.sin(negative_actions), torch.cos(negative_actions)]
-            ).moveaxis(0, -1)
-            negative_full = torch.cat(
-                (
-                    cur_state.unsqueeze(1).expand(-1, config.num_negatives, -1),
-                    negative_dirs,
-                ),
-                dim=-1,
-            ).to(device)
-
-            neg_action_enc = encoder1(negative_full)
-
-            action_loss = explicit_InfoNCE(
-                positive_enc,
-                anchor_enc,
-                neg_action_enc,
-                config.temperature,
-                hyperbolic=config.hyperbolic,
-                manifold=manifold,
-                dot=False,
-            )
-            # action_loss = infoNCE_loss(positive_enc, anchor_enc, neg_action_enc, config.temperature)
-            # backprop
-            loss = future_loss + action_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -156,34 +215,34 @@ def main():
 
         loss = total_loss / len(dataloader)
 
-        if epoch % 32 == 0 and epoch != 0:
-            # Runs agent in environment, collects failure and path length metrics
-            evals = evaluate(
+        if epoch % 10 == 0 and epoch != 0:
+            #Runs agent in environment, collects failure and path length metrics
+            evals = evaluate_pairs(
                 maze,
                 config.eval_trials,
-                encoder1,
-                encoder2,
+                pair_encoder,
                 manifold,
                 device,
                 max_steps=config.max_steps,
                 hyperbolic=config.hyperbolic,
                 eps=50.0,
             )
-            acc = np.mean([x[2] for x in evals])
-            fail = np.mean([x[0] for x in evals])
+            # acc = np.mean([x[2] for x in evals])
+            # fail = np.mean([x[0] for x in evals])
 
-            metrics = {"epoch": epoch + 1, "loss": loss, "spl": acc, "fail": fail}
-            wandb.log(metrics)
+            # metrics = {"epoch": epoch + 1, "loss": loss, "spl": acc, "fail": fail}
+            # wandb.log(metrics)
 
-            print(f"Epoch {epoch+1}, Loss: {loss}, SPL: {acc}, Failure %: {fail}")
+            # print(f"Epoch {epoch+1}, Loss: {loss}, SPL: {acc}, Failure %: {fail}")
 
-            save_models(config, encoder1, encoder2, epoch, experiment_name)
+            #save_models(config, encoder1, encoder2, epoch, experiment_name)
+            #print("not impeklemnted yet")
         else:
             metrics = {"epoch": epoch + 1, "loss": loss}
             wandb.log(metrics)
             print(f"Epoch {epoch+1}, Loss: {loss}")
 
-    save_models(config, encoder1, encoder2, epoch + 1, experiment_name)
+    #save_models(config, encoder1, encoder2, epoch + 1, experiment_name)
 
 
 if __name__ == "__main__":

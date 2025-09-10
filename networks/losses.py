@@ -10,6 +10,13 @@ def explicit_InfoNCE(anchor, positive, negatives, temperature, hyperbolic=False,
     if hyperbolic:
         positive_scores = -manifold.dist(x=anchor, y=positive).unsqueeze(1) / temperature
         negative_scores = -manifold.dist(x=anchor.unsqueeze(1), y=negatives) / temperature
+        # pos_mean = positive_scores.detach().mean().item()
+        # pos_std  = positive_scores.detach().std().item()
+        # neg_mean = negative_scores.detach().mean().item()
+        # neg_std  = negative_scores.detach().std().item()
+        # print(f"[InfoNCE] pos μ={pos_mean:.4f}±{pos_std:.4f} | neg μ={neg_mean:.4f}±{neg_std:.4f}")
+
+
     else:
         if dot:
             anchor = F.normalize(anchor, dim=-1)

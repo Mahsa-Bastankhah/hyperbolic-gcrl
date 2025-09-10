@@ -130,7 +130,8 @@ def plot_traj(maze, path):
   ax.grid(which='both', color='black', linestyle='-', linewidth=1)
   ax.set_title('Maze with Shortest Path Highlighted')
 
-  plt.show()
+  
+  plt.savefig(f'maze_path_{len(path)}.png')
 
 # def get_trajectories(maze, num_trajectories, plot=False):
 #   valid_indices = np.argwhere(maze == 0)
@@ -153,7 +154,7 @@ def get_trajectories(maze, num_trajectories, order_fn=None, plot=False):
     np.random.shuffle(valid_indices)
     traj_ds = []
     
-    for _ in range(num_trajectories):
+    while len(traj_ds) < num_trajectories:
         start_idx, end_idx = np.random.randint(0, len(valid_indices), size=2)
         start = tuple(valid_indices[start_idx])
         end = tuple(valid_indices[end_idx])
@@ -163,8 +164,8 @@ def get_trajectories(maze, num_trajectories, order_fn=None, plot=False):
         # print(start, end)
         
         traj = gen_traj(maze, start, end)
-        # print(traj)
-        if len(traj) > 0:
+        #print(traj)
+        if len(traj) > 20:
             if plot:
                 plot_traj(maze, [x[0] for x in traj])
             traj_ds.append(traj)

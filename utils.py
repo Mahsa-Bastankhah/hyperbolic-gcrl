@@ -13,6 +13,150 @@ from environments.maze.pyramid import create_pyramid
 from environments.maze.continuous_maze import bfs, ContinuousGridEnvironment
 from environments.tree.tree import NaryTreeEnvironment
 from environments.tree.discrete_maze import GridMazeEnvironment
+from networks.hypnets import PairEncoder  # adjust import path as needed
+import torch.nn.functional as F
+
+import torch
+import numpy as np
+
+@torch.no_grad()
+def evaluate_pairs(
+    maze,
+    num_trials,
+    pair_encoder,          # f(s,g): concat [s,g] -> emb
+    manifold,
+    device,
+    max_steps=100,
+    hyperbolic=False,
+    eps=10.0,              # deg of Gaussian angle noise (same semantics as before)
+    step_size=0.5,
+    verbose=False,
+    num_angles=4,
+):
+    """
+    Run a greedy policy guided by pair embeddings:
+      pick action a that minimizes dist( φ(s,g), φ(s_next(a), g) )
+
+    Returns: list of tuples (failed: bool, steps: int, SPL: float)
+    """
+    valid_indices = np.argwhere(maze == 0)
+    np.random.shuffle(valid_indices)
+
+    def reached(cur_pos, goal_pos):
+        return (int(cur_pos[0]), int(cur_pos[1])) == (int(goal_pos[0]), int(goal_pos[1]))
+
+    def SPL(maze, start, end, num_steps, success):
+        if not success:
+            return 0.0
+        p = num_steps * step_size
+        l = len(bfs(maze, start, end))  # discrete shortest path length
+        return l / max(p, l)
+
+    results = []
+    rand_results = []
+    for _ in range(num_trials):
+        # sample start/end grid cells
+        si, gi = np.random.randint(0, len(valid_indices), size=2)
+        s_cell = tuple(valid_indices[si])
+        g_cell = tuple(valid_indices[gi])
+
+        # continuous env at cell centers
+        env = ContinuousGridEnvironment(maze, np.array(s_cell, dtype=float) + 0.5, {})
+
+        # tensors for goal state
+        g = torch.tensor(g_cell, dtype=torch.float32, device=device).unsqueeze(0)
+
+        steps = 0
+        while not reached(env.agent_position, g_cell):
+            if steps > max_steps:
+                break
+
+            # current continuous state (centered cell coords are fine)
+            s = torch.tensor(env.agent_position, dtype=torch.float32, device=device).unsqueeze(0)
+
+            # φ(s,g)
+            sg = torch.cat([s, g], dim=-1)                 # [1, 2*state_dim]
+            z_anchor = pair_encoder(sg)                    # ManifoldTensor or Tensor [1,D]
+
+            # propose actions over a grid of angles
+            angles = torch.linspace(0.0, 2 * torch.pi, num_angles, device=device, dtype=torch.float32)
+            cand_scores = []
+            cand_actions = []
+
+            for a in angles:
+                # candidate unit action
+                act = torch.stack([torch.sin(a), torch.cos(a)]).cpu().numpy()
+
+                # compute next pos WITHOUT mutating env (use its collision check)
+                # desired new position:
+                unit = act / (np.linalg.norm(act) + 1e-9)
+                desired = env.agent_position + step_size * unit
+                _, cand_pos = env.calculate_move(desired)  # returns (is_valid, clipped_pos)
+
+                # φ(neighbor,g)
+                n = torch.tensor(cand_pos, dtype=torch.float32, device=device).unsqueeze(0)
+                ng = torch.cat([n, g], dim=-1)
+                z_cand = pair_encoder(ng)
+
+                # distance(φ(s,g), φ(neighbor,g)) → score = -dist
+                if hyperbolic:
+                    d = manifold.dist(x=z_anchor, y=z_cand)     # [1]
+                else:
+                    d = torch.norm(
+                        getattr(z_anchor, "tensor", z_anchor) - getattr(z_cand, "tensor", z_cand),
+                        dim=-1,
+                    )  # [1]
+                cand_scores.append(-d.squeeze(0))  # maximize score
+                cand_actions.append(act)
+
+            # pick best action and add small Gaussian angle noise (same as before)
+            # best_idx = int(torch.argmax(torch.stack(cand_scores)).item())
+            # best_action = cand_actions[best_idx]
+            # angle = np.arctan2(best_action[0], best_action[1]) + np.random.normal() * eps * (2 * np.pi / 360)
+            # best_action = np.array([np.sin(angle), np.cos(angle)], dtype=float)
+            scores = torch.stack(cand_scores)                # shape [num_actions]
+            probs = F.softmax(scores / 0.1, dim=0)   # softmax over scores
+
+            # sample index according to probabilities
+            best_idx = torch.multinomial(probs, num_samples=1).item()
+            best_action = cand_actions[best_idx]
+
+            # add angular noise
+            #angle = np.arctan2(best_action[0], best_action[1]) + np.random.normal() * eps * (2 * np.pi / 360)
+            #best_action = np.array([np.sin(angle), np.cos(angle)], dtype=float)
+
+            env.move_agent(best_action)
+            steps += 1
+
+            if verbose:
+                print(f"step={steps} pos={env.agent_position} goal={g_cell}")
+
+        success = reached(env.agent_position, g_cell)
+        results.append((not success, steps, SPL(maze, s_cell, g_cell, steps, success)))
+
+        # ----- Random policy roll (fresh env) -----
+        env_r = ContinuousGridEnvironment(maze, np.array(s_cell, float) + 0.5, {})
+        steps_r = 0
+        while not reached(env_r.agent_position, g_cell):
+            if steps_r > max_steps:
+                break
+            theta = np.random.uniform(0.0, 2 * np.pi)
+            env_r.move_agent(np.array([np.sin(theta), np.cos(theta)], dtype=float))
+            steps_r += 1
+            if verbose:
+                print(f"[random ] step={steps_r} pos={env_r.agent_position} goal={g_cell}")
+
+        success_r = reached(env_r.agent_position, g_cell)
+        rand_results.append((not success_r, steps_r, SPL(maze, s_cell, g_cell, steps_r, success_r)))
+
+    # ---- print success rates ----
+    learned_success = 1.0 - float(np.mean([f for f, _, _ in results]))
+    random_success  = 1.0 - float(np.mean([f for f, _, _ in rand_results]))
+    print(f"[eval] learned success={learned_success:.3f} | random success={random_success:.3f}")
+
+    return results
+
+    return results
 
 
 def evaluate(
@@ -383,89 +527,121 @@ def save_models(config, encoder1, encoder2, epoch, name="", street_encoder=None)
     with open(config_path, "w") as f:
         json.dump(config, f, indent=4)
 
+# --- CHANGE inside load_model(...) ---
 
-def load_model(config, device, pretrained_path="", epoch=0):
+
+
+def load_model(config, device, pretrained_path=''):
+    # build (or load) manifold as you already do
     config = dict(config)
 
     curvature = Curvature(
         value=config["curvature"], requires_grad=config["learnable_curvature"]
     )
     manifold = PoincareBall(c=curvature)
-    if config["architecture"] == "MLP":
-        if config["hyperbolic"]:
-            encoder1 = HyperbolicMLP(
-                in_features=4,
-                out_features=config["embedding_dim"],
-                euc_width=64,
-                hyp_width=64,
-                manifold=manifold,
-            ).to(device)
-            encoder2 = HyperbolicMLP(
-                in_features=2,
-                out_features=config["embedding_dim"],
-                euc_width=64,
-                hyp_width=64,
-                manifold=manifold,
-            ).to(device)
-        else:
-            encoder1 = SmallEncoder(
-                input_dim=4, embedding_dim=config["embedding_dim"]
-            ).to(device)
-            encoder2 = SmallEncoder(
-                input_dim=2, embedding_dim=config["embedding_dim"]
-            ).to(device)
-            manifold = None
-    elif config["architecture"] == "DeepSet":
-        if config["hyperbolic"]:
-            encoder1 = HyperbolicDeepSet(
-                input_dim=2,
-                hidden_dim=64,
-                output_dim=config["embedding_dim"],
-                manifold=manifold,
-            ).to(device)
-            encoder2 = HyperbolicDeepSet(
-                input_dim=2,
-                hidden_dim=64,
-                output_dim=config["embedding_dim"],
-                manifold=manifold,
-            ).to(device)
-            optimizer = RiemannianAdam(
-                list(encoder1.parameters()) + list(encoder2.parameters()),
-                lr=config["learning_rate"],
-            )
-        else:
-            encoder1 = DeepSet(
-                input_dim=2, hidden_dim=64, output_dim=config["embedding_dim"]
-            ).to(device)
-            encoder2 = DeepSet(
-                input_dim=2, hidden_dim=64, output_dim=config["embedding_dim"]
-            ).to(device)
-            optimizer = torch.optim.Adam(
-                list(encoder1.parameters()) + list(encoder2.parameters()),
-                lr=config["learning_rate"],
-            )
-    else:
-        encoder1 = None
-        encoder2 = None
-        optimizer = None
-        manifold = None
 
-    if len(pretrained_path) > 0:
-        # print("loading pretrained...")
-        encoder1.load_state_dict(
-            torch.load(
-                os.path.join(pretrained_path, f"encoder1_epoch_{epoch}.pth"),
-                map_location=torch.device(device),
-            )
-        )
-        encoder2.load_state_dict(
-            torch.load(
-                os.path.join(pretrained_path, f"encoder2_epoch_{epoch}.pth"),
-                map_location=torch.device(device),
-            )
-        )
+    state_dim = config["state_dim"]      # add to your config if not present
+    out_dim   = config["embedding_dim"]
 
-    return {"encoder1": encoder1, "encoder2": encoder2, "manifold": manifold}
+    pair_encoder = PairEncoder(
+        state_dim=state_dim,
+        out_dim=out_dim,
+        hyperbolic=config["hyperbolic"],
+        manifold=manifold,
+        euc_width=config.get("euc_width", 256),
+        hyp_width=config.get("hyp_width", 256),
+    ).to(device)
+
+    # (optional) load weights if pretrained_path provided
+
+    return {
+        "pair_encoder": pair_encoder,
+        "manifold": manifold,
+    }
+
+
+# def load_model(config, device, pretrained_path="", epoch=0):
+#     config = dict(config)
+
+#     curvature = Curvature(
+#         value=config["curvature"], requires_grad=config["learnable_curvature"]
+#     )
+#     manifold = PoincareBall(c=curvature)
+#     if config["architecture"] == "MLP":
+#         if config["hyperbolic"]:
+#             encoder1 = HyperbolicMLP(
+#                 in_features=4,
+#                 out_features=config["embedding_dim"],
+#                 euc_width=64,
+#                 hyp_width=64,
+#                 manifold=manifold,
+#             ).to(device)
+#             encoder2 = HyperbolicMLP(
+#                 in_features=2,
+#                 out_features=config["embedding_dim"],
+#                 euc_width=64,
+#                 hyp_width=64,
+#                 manifold=manifold,
+#             ).to(device)
+#         else:
+#             encoder1 = SmallEncoder(
+#                 input_dim=4, embedding_dim=config["embedding_dim"]
+#             ).to(device)
+#             encoder2 = SmallEncoder(
+#                 input_dim=2, embedding_dim=config["embedding_dim"]
+#             ).to(device)
+#             manifold = None
+#     elif config["architecture"] == "DeepSet":
+#         if config["hyperbolic"]:
+#             encoder1 = HyperbolicDeepSet(
+#                 input_dim=2,
+#                 hidden_dim=64,
+#                 output_dim=config["embedding_dim"],
+#                 manifold=manifold,
+#             ).to(device)
+#             encoder2 = HyperbolicDeepSet(
+#                 input_dim=2,
+#                 hidden_dim=64,
+#                 output_dim=config["embedding_dim"],
+#                 manifold=manifold,
+#             ).to(device)
+#             optimizer = RiemannianAdam(
+#                 list(encoder1.parameters()) + list(encoder2.parameters()),
+#                 lr=config["learning_rate"],
+#             )
+#         else:
+#             encoder1 = DeepSet(
+#                 input_dim=2, hidden_dim=64, output_dim=config["embedding_dim"]
+#             ).to(device)
+#             encoder2 = DeepSet(
+#                 input_dim=2, hidden_dim=64, output_dim=config["embedding_dim"]
+#             ).to(device)
+#             optimizer = torch.optim.Adam(
+#                 list(encoder1.parameters()) + list(encoder2.parameters()),
+#                 lr=config["learning_rate"],
+#             )
+#     else:
+#         encoder1 = None
+#         encoder2 = None
+#         optimizer = None
+#         manifold = None
+
+#     if len(pretrained_path) > 0:
+#         # print("loading pretrained...")
+#         encoder1.load_state_dict(
+#             torch.load(
+#                 os.path.join(pretrained_path, f"encoder1_epoch_{epoch}.pth"),
+#                 map_location=torch.device(device),
+#             )
+#         )
+#         encoder2.load_state_dict(
+#             torch.load(
+#                 os.path.join(pretrained_path, f"encoder2_epoch_{epoch}.pth"),
+#                 map_location=torch.device(device),
+#             )
+#         )
+
+#     return {"encoder1": encoder1, "encoder2": encoder2, "manifold": manifold}
 
 
 def load_tree_model(config, state_dim, action_dim, device, pretrained_path="", epoch=0):

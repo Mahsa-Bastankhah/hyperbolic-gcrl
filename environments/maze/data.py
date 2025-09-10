@@ -53,27 +53,68 @@ class TrajectoryDataset(Dataset):
     def __len__(self):
         return len(self.trajectories)
 
-    def __getitem__(self, idx):
-        # Anchor: the current data point
+    # def __getitem__(self, idx):
+    #     # Anchor: the current data point
         
-        traj = self.trajectories[idx]
-        # print(traj)
-        # start, end = np.sort(np.random.randint(0, len(traj), size=2))
-        start = np.random.randint(0, len(traj))
-        end = min(start + np.random.geometric(p=self.gamma), len(traj) - 1)
+    #     traj = self.trajectories[idx]
+    #     # print(traj)
+    #     # start, end = np.sort(np.random.randint(0, len(traj), size=2))
+    #     start = np.random.randint(0, len(traj))
+    #     end = min(start + np.random.geometric(p=self.gamma), len(traj) - 1)
 
-        anchor = self.trajectories[idx][start]
-        anchor = np.array([np.array(anchor[0]), np.array(anchor[1])]).flatten()
-        # Label of the anchor
-        positive_example = self.trajectories[idx][end][0]
+    #     anchor = self.trajectories[idx][start]
+    #     anchor = np.array([np.array(anchor[0]), np.array(anchor[1])]).flatten()
+    #     # Label of the anchor
+    #     positive_example = self.trajectories[idx][end][0]
 
-        negative_examples = []
-        for i in range(self.num_negatives):
-          idy = np.random.randint(0, len(self.trajectories))
-          neg_state = self.trajectories[idy][np.random.randint(0, len(self.trajectories[idy]))][0]
-          negative_examples.append(neg_state)
+    #     negative_examples = []
+    #     for i in range(self.num_negatives):
+    #       idy = np.random.randint(0, len(self.trajectories))
+    #       neg_state = self.trajectories[idy][np.random.randint(0, len(self.trajectories[idy]))][0]
+    #       negative_examples.append(neg_state)
 
-        return anchor, np.array(positive_example), np.array(negative_examples)
+    #     return anchor, np.array(positive_example), np.array(negative_examples)
+
+    # --- CHANGE in TrajectoryDataset.__getitem__ ---
+
+    def __getitem__(self, idx):
+        traj = self.trajectories[idx]          # list/array of (state, action_dir?) tuples
+        T = len(traj)
+
+        # choose i < j
+        i = np.random.randint(0, T - 2)
+        j = np.random.randint(i + 2, T)
+
+        # choose a, b uniformly with i < a <= b < j
+        a = np.random.randint(i + 1, j)
+        b = np.random.randint(a, j)
+        #print(i, j, a, b)
+
+        # pull raw states (we ignore action for pair-encoding)
+        s_i = np.array(traj[i][0], dtype=np.float32)  # shape: state_dim
+        s_j = np.array(traj[j][0], dtype=np.float32)
+        s_a = np.array(traj[a][0], dtype=np.float32)
+        s_b = np.array(traj[b][0], dtype=np.float32)
+
+        # concatenate to make pairs [s, g]
+        anchor_pair   = np.concatenate([s_i, s_j], axis=-1)  # shape: 2*state_dim
+        positive_pair = np.concatenate([s_a, s_b], axis=-1)
+
+        # negatives: random pairs from random trajectories / positions
+        neg_pairs = []
+        for _ in range(self.num_negatives):
+            idy = np.random.randint(0, len(self.trajectories))
+            traj_y = self.trajectories[idy]
+            Ty = len(traj_y)
+            u = np.random.randint(0, Ty - 1)
+            v = np.random.randint(u + 1, Ty)
+            s_u = np.array(traj_y[u][0], dtype=np.float32)
+            s_v = np.array(traj_y[v][0], dtype=np.float32)
+            neg_pairs.append(np.concatenate([s_u, s_v], axis=-1))
+        neg_pairs = np.stack(neg_pairs, axis=0).astype(np.float32)  # [K, 2*state_dim]
+
+        return anchor_pair, positive_pair, neg_pairs
+
 
 class LabelDataset(Dataset):
     def __init__(self, maze, size=100, num_negatives=10):

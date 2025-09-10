@@ -3,14 +3,14 @@ project: hyperbolic
 custom: '2' # string appended to experiment name
 
 # Model parameters
-hyperbolic: true
-embedding_dim: 2
+hyperbolic: false
+embedding_dim: 16
 curvature: 1.0 # absolute value of curvature (always negative)
 learnable_curvature: true
 
 # Training parameters
 num_epochs: 256
-num_trajectories: 10000
+num_trajectories: 100000
 batch_size: 128
 num_negatives: 64
 max_steps: 100 
@@ -26,3 +26,6 @@ order_name: ''
 eval_trials: 10
 temperature: 0.1
 architecture: MLP
+
+
+state_dim: 2 
