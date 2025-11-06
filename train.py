@@ -215,7 +215,7 @@ def main():
 
         loss = total_loss / len(dataloader)
 
-        if epoch % 10 == 0 and epoch != 0:
+        if epoch % 1 == 0 and epoch != 0:
             #Runs agent in environment, collects failure and path length metrics
             evals = evaluate_pairs(
                 maze,
@@ -235,12 +235,13 @@ def main():
 
             # print(f"Epoch {epoch+1}, Loss: {loss}, SPL: {acc}, Failure %: {fail}")
 
-            #save_models(config, encoder1, encoder2, epoch, experiment_name)
-            #print("not impeklemnted yet")
+            
+
         else:
             metrics = {"epoch": epoch + 1, "loss": loss}
             wandb.log(metrics)
             print(f"Epoch {epoch+1}, Loss: {loss}")
+        save_models(config, pair_encoder, epoch, experiment_name)
 
     #save_models(config, encoder1, encoder2, epoch + 1, experiment_name)
 

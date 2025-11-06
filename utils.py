@@ -4,7 +4,10 @@ import torch
 import json
 import numpy as np
 import random
-
+import os
+import matplotlib.pyplot as plt
+from torch.serialization import safe_globals
+from hypll.tensors.manifold_tensor import ManifoldTensor
 from hypll.manifolds.poincare_ball import Curvature, PoincareBall
 from networks.hypnets import HyperbolicMLP, HyperbolicDeepSet, HyperbolicCategoricalMLP
 from networks.nets import SmallEncoder, DeepSet, LabelEncoder, CategoricalMLP
@@ -23,16 +26,19 @@ import numpy as np
 def evaluate_pairs(
     maze,
     num_trials,
-    pair_encoder,          # f(s,g): concat [s,g] -> emb
+    pair_encoder,
     manifold,
     device,
     max_steps=100,
     hyperbolic=False,
-    eps=10.0,              # deg of Gaussian angle noise (same semantics as before)
+    eps=10.0,
     step_size=0.5,
     verbose=False,
     num_angles=4,
-):
+    plot=True,                 # <-- add
+    save_dir="figures",         # <-- add
+    ):
+
     """
     Run a greedy policy guided by pair embeddings:
       pick action a that minimizes dist( φ(s,g), φ(s_next(a), g) )
@@ -41,6 +47,10 @@ def evaluate_pairs(
     """
     valid_indices = np.argwhere(maze == 0)
     np.random.shuffle(valid_indices)
+
+    if plot and save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+
 
     def reached(cur_pos, goal_pos):
         return (int(cur_pos[0]), int(cur_pos[1])) == (int(goal_pos[0]), int(goal_pos[1]))
@@ -54,7 +64,9 @@ def evaluate_pairs(
 
     results = []
     rand_results = []
-    for _ in range(num_trials):
+    # for _ in range(num_trials):
+    for trial_idx in range(num_trials):
+
         # sample start/end grid cells
         si, gi = np.random.randint(0, len(valid_indices), size=2)
         s_cell = tuple(valid_indices[si])
@@ -62,6 +74,7 @@ def evaluate_pairs(
 
         # continuous env at cell centers
         env = ContinuousGridEnvironment(maze, np.array(s_cell, dtype=float) + 0.5, {})
+        trace = [np.array(env.agent_position, dtype=float, copy=True)]
 
         # tensors for goal state
         g = torch.tensor(g_cell, dtype=torch.float32, device=device).unsqueeze(0)
@@ -126,13 +139,39 @@ def evaluate_pairs(
             #best_action = np.array([np.sin(angle), np.cos(angle)], dtype=float)
 
             env.move_agent(best_action)
+            trace.append(np.array(env.agent_position, dtype=float, copy=True))
+
             steps += 1
 
             if verbose:
                 print(f"step={steps} pos={env.agent_position} goal={g_cell}")
+        
 
         success = reached(env.agent_position, g_cell)
         results.append((not success, steps, SPL(maze, s_cell, g_cell, steps, success)))
+        if plot:
+            fig, ax = plt.subplots(figsize=(6, 6))
+            ax.imshow(maze, cmap=plt.cm.binary)
+
+            tr = np.array(trace)
+            # plot path (cols = x, rows = y)
+            ax.plot(tr[:, 1], tr[:, 0], '-', color='red', linewidth=2, label='path')
+
+            s_ctr = np.array(s_cell) + 0.5
+            g_ctr = np.array(g_cell) + 0.5
+            ax.scatter(s_ctr[1], s_ctr[0], c='green', s=80, marker='o', edgecolors='k', label='start')
+            ax.scatter(g_ctr[1], g_ctr[0], c='blue',  s=80, marker='X', edgecolors='k', label='goal')
+
+            ax.set_xticks(np.arange(-0.5, maze.shape[1], 1))
+            ax.set_yticks(np.arange(-0.5, maze.shape[0], 1))
+            ax.set_xticklabels([]); ax.set_yticklabels([])
+            ax.grid(which='both', color='black', linestyle='-', linewidth=1, alpha=0.4)
+            ax.set_title(f"trial #{trial_idx+1} | success={success} | steps={steps}")
+            ax.legend(loc='upper right', fontsize=8)
+
+            out = os.path.join(save_dir, f"pair_traj_{trial_idx+1:03d}.png")
+            fig.savefig(out, dpi=200, bbox_inches="tight")
+            plt.close(fig)
 
         # ----- Random policy roll (fresh env) -----
         env_r = ContinuousGridEnvironment(maze, np.array(s_cell, float) + 0.5, {})
@@ -156,7 +195,7 @@ def evaluate_pairs(
 
     return results
 
-    return results
+
 
 
 def evaluate(
@@ -444,7 +483,7 @@ def get_maze(name):
 
     if "blank" in name:
         print("blank maze")
-        maze = np.zeros((10, 10))
+        maze = np.zeros((1, 10))
     elif "slit" in name:
         print("slit maze")
         maze = np.zeros((11, 11))
@@ -500,38 +539,59 @@ def get_order_function(name):
         return None
 
 
-def save_models(config, encoder1, encoder2, epoch, name="", street_encoder=None):
-    print(f'saved model to {name}')
-    # Create the main models directory if it doesn't exist
-    config = dict(config)
-    os.makedirs("saved_models", exist_ok=True)
+# def save_models(config, encoder1, encoder2, epoch, name="", street_encoder=None):
+#     print(f'saved model to {name}')
+#     # Create the main models directory if it doesn't exist
+#     config = dict(config)
+#     os.makedirs("saved_models", exist_ok=True)
 
+#     model_dir = os.path.join("saved_models", name)
+#     os.makedirs(model_dir, exist_ok=True)
+
+#     # Save the encoder models
+#     torch.save(
+#         encoder1.state_dict(), os.path.join(model_dir, f"encoder1_epoch_{epoch}.pth")
+#     )
+#     torch.save(
+#         encoder2.state_dict(), os.path.join(model_dir, f"encoder2_epoch_{epoch}.pth")
+#     )
+#     if street_encoder is not None:
+#         torch.save(
+#             street_encoder.state_dict(),
+#             os.path.join(model_dir, f"street_encoder_epoch_{epoch}.pth"),
+#         )
+
+#     # Save the config as JSON
+#     config_path = os.path.join(model_dir, f"config.json")
+#     with open(config_path, "w") as f:
+#         json.dump(config, f, indent=4)
+
+
+def save_models(config, pair_encoder, epoch, name=""):
+    print(f"saved model to {name}")
+    config = dict(config)
+
+    os.makedirs("saved_models", exist_ok=True)
     model_dir = os.path.join("saved_models", name)
     os.makedirs(model_dir, exist_ok=True)
 
-    # Save the encoder models
+    # Save the pair encoder
     torch.save(
-        encoder1.state_dict(), os.path.join(model_dir, f"encoder1_epoch_{epoch}.pth")
+        pair_encoder.state_dict(),
+        os.path.join(model_dir, f"pair_encoder_epoch_{epoch}.pth"),
     )
-    torch.save(
-        encoder2.state_dict(), os.path.join(model_dir, f"encoder2_epoch_{epoch}.pth")
-    )
-    if street_encoder is not None:
-        torch.save(
-            street_encoder.state_dict(),
-            os.path.join(model_dir, f"street_encoder_epoch_{epoch}.pth"),
-        )
 
     # Save the config as JSON
-    config_path = os.path.join(model_dir, f"config.json")
+    config_path = os.path.join(model_dir, "config.json")
     with open(config_path, "w") as f:
         json.dump(config, f, indent=4)
+
 
 # --- CHANGE inside load_model(...) ---
 
 
 
-def load_model(config, device, pretrained_path=''):
+def load_model(config, device, pretrained_path='', epoch=1):
     # build (or load) manifold as you already do
     config = dict(config)
 
@@ -551,6 +611,16 @@ def load_model(config, device, pretrained_path=''):
         euc_width=config.get("euc_width", 256),
         hyp_width=config.get("hyp_width", 256),
     ).to(device)
+
+    if len(pretrained_path) > 0:
+        print("loading pretrained...")
+        with safe_globals([ManifoldTensor]):
+            pair_encoder.load_state_dict(
+                torch.load(
+                    os.path.join(pretrained_path, f"pair_encoder_epoch_{epoch}.pth"),
+                    map_location=torch.device(device), weights_only=False
+                )
+            )
 
     # (optional) load weights if pretrained_path provided
 

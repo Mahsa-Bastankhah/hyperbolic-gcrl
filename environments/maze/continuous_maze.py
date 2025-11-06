@@ -165,7 +165,7 @@ def get_trajectories(maze, num_trajectories, order_fn=None, plot=False):
         
         traj = gen_traj(maze, start, end)
         #print(traj)
-        if len(traj) > 20:
+        if len(traj) > 4:
             if plot:
                 plot_traj(maze, [x[0] for x in traj])
             traj_ds.append(traj)

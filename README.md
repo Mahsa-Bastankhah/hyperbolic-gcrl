@@ -31,3 +31,21 @@ Run set experiments with scripts/train_set.slurm. Code is in early-stages for th
 Notebooks SetViz.ipynb can be used for visualizing the set experiments
 
 GeodesicInterpolation,ipynb, HyperbolicVisualization.ipynb, and TreevsEuclidean.ipynb for visualizing discrete experiments tree/maze experiments
+
+### Pair encoder
+This is a new version of the code that learns an embedding for a pair of initial and goal state s,g. A trajectory is sampled from teh replay buffer and phi(s,g) , phi(w_1,w_2) are used as positive example when s -> w_1 -> w_2 -> g for a trajectory.
+
+This code only runs for the continuous maze enviornment, in particular I instantiated a 10x1 emptry room (no walls). 
+
+In ordrer to run the experiment do:
+
+```
+python train.py --config_file configs/config_hyp.yaml
+```
+
+In order to see the norm of the embeddings for different pairs of states, run the following:
+
+```
+python -m notebooks.visualizePairEncoder
+```
+You should specify which epoch you want to look at in the code.
